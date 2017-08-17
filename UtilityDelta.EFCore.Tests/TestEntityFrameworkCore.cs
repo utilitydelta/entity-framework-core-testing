@@ -86,5 +86,64 @@ namespace UtilityDelta.EFCore.Tests
             var sqlText = m_sql.Last();
             Assert.IsTrue(sqlText.Contains("WHERE EXISTS"));
         }
+
+        [DataTestMethod]
+        [DataRow(true)]
+        [DataRow(false)]
+        public async Task TestProjection(bool checkName)
+        {
+            //Mark as expandable for linqkit operations on query tree
+            var query = m_context.Parents.AsExpandable();
+
+            //Flatten data with projection
+            var coolKids = KidExtensions.OnlyCoolKids(checkName);
+            var projection = query.Select(parent => new
+            {
+                Grandparent = parent.Grandparent,
+
+                //Generates outer apply (TOP 1) or sub select in SELECT clause
+                //Project this early so we can use it later in our Select of columns
+                BestKid = parent.Kids.FirstOrDefault(kid =>
+                    //combine func with Invoke() with other clause
+                    coolKids.Invoke(kid) || kid.Name == "boo"),
+
+                //Not generated in SQL as not referenced in query (no Where / Select)
+                parent.Kids,
+
+                //current parent
+                Parent = parent
+            });
+
+            projection = projection
+                .Where(parent => parent.BestKid.Name != "random name")
+                .Where(parent => parent.Grandparent.Name == "Geoff");
+
+            Assert.AreEqual(await projection.CountAsync(), 1);
+
+            var sqlText = m_sql.Last();
+
+            //Uses the lambda variable name as alias
+            Assert.IsTrue(sqlText.Contains("FROM \"Parents\" AS \"parent\""));
+
+            //INNER JOIN for grandparent
+            Assert.IsTrue(sqlText.Contains("INNER JOIN \"Grandparents\" AS \"parent.Grandparent\" ON \"parent\".\"GrandparentId\" = \"parent.Grandparent\".\"Id\""));
+
+            if (checkName)
+            {
+                //Also check if the kid is called "Mr. Cool"
+                Assert.IsTrue(sqlText.Contains("WHERE (((\"kid\".\"IsCool\" = 1) OR (\"kid\".\"Name\" = 'Mr. Cool'))"));
+            }
+            else
+            {
+                //Check if kid is cool
+                Assert.IsTrue(sqlText.Contains("WHERE ((\"kid\".\"IsCool\" = 1) OR (\"kid\".\"Name\" = 'boo'))"));
+            }
+
+            //Apply limit for kids as we are doing sub select
+            Assert.IsTrue(sqlText.Contains($"LIMIT 1{Environment.NewLine}) <> 'random name')"));
+
+            //Grandparent must be Geoff
+            Assert.IsTrue(sqlText.Contains("AND (\"parent.Grandparent\".\"Name\" = 'Geoff')"));
+        }
     }
 }
