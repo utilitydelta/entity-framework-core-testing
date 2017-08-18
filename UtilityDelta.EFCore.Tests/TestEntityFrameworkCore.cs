@@ -59,6 +59,11 @@ namespace UtilityDelta.EFCore.Tests
                                 Name = "Mr. Cool"
                             },
                         }
+                    },
+                    new Parent()
+                    {
+                        Name = "Frank",
+                        IsMale = true
                     }
                 }
             });
@@ -108,10 +113,7 @@ namespace UtilityDelta.EFCore.Tests
                     coolKids.Invoke(kid) || kid.Name == "boo"),
 
                 //Not generated in SQL as not referenced in query (no Where / Select)
-                parent.Kids,
-
-                //current parent
-                Parent = parent
+                parent.Kids
             });
 
             projection = projection
@@ -144,6 +146,76 @@ namespace UtilityDelta.EFCore.Tests
 
             //Grandparent must be Geoff
             Assert.IsTrue(sqlText.Contains("AND (\"parent.Grandparent\".\"Name\" = 'Geoff')"));
+        }
+
+        [TestMethod]
+        public async Task TestColumnRestriction()
+        {
+            var query = m_context.Kids
+                .Select(kid => new
+                {
+                    kid.Name,
+                    kid.IsCool
+                });
+
+            var data = await query.ToListAsync();
+
+            Assert.IsFalse(data[1].IsCool);
+
+            var sqlText = m_sql.Last();
+            Assert.AreEqual(sqlText, "SELECT \"kid\".\"Name\", \"kid\".\"IsCool\"\r\nFROM \"Kids\" AS \"kid\"");
+        }
+
+        
+        [TestMethod]
+        public async Task TestMultipleRefsToSubQuery()
+        {
+            var query = m_context.Parents
+                .Select(parent => new
+                {
+                    Name = parent.Name,
+                    //MUST always use FirstOrDefault otherwise the query will be split into two queries
+                    BestKid = parent.Kids.FirstOrDefault(kid => kid.IsCool)
+                });
+
+            var query2 = query
+                .Select(x => new
+            {
+                KidName = x.BestKid.Name,
+                x.Name
+                });
+            
+            var data = await query2.ToListAsync();
+
+            Assert.AreEqual(data[0].KidName, "Kid one");
+            Assert.AreEqual(data[0].Name, "Joe");
+
+            Assert.AreEqual(m_sql.Count, 2);
+
+            // BestKid becomes a sub query in the select statement
+            var sqlText = m_sql.Last();
+            Assert.IsTrue(sqlText.Contains("SELECT (\r\n    SELECT \"kid\".\"Name\"\r\n    FROM \"Kids\" AS \"kid\"\r\n    WHERE (\"kid\".\"IsCool\" = 1) AND (\"parent\".\"Id\" = \"kid\".\"ParentId\")\r\n    LIMIT 1\r\n) AS \"KidName\","));
+        }
+
+        [TestMethod]
+        public async Task TestJoinParentMultipleColumns()
+        {
+            var query = m_context.Parents
+                .Select(parent => new
+                {
+                    //Single join for two parent columns
+                    GrandparentName = parent.Grandparent.Name,
+                    GrandparentId = parent.Grandparent.Id,
+                });
+            var result = await query.FirstOrDefaultAsync();
+
+            Assert.AreEqual(result.GrandparentName, "Geoff");
+            Assert.AreEqual(result.GrandparentId, 1);
+
+            //Only one INNER JOIN
+            var sqlText = m_sql.Last();
+            Assert.IsTrue(sqlText.Split("INNER JOIN").Length == 2);
+
         }
     }
 }
